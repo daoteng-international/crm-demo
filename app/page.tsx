@@ -1,7 +1,7 @@
 "use client";
 
 import {
-  Banknote, Boxes, Building2, CalendarRange, ChartArea,
+  Banknote, Boxes, Building2, CalendarRange, BarChart2,
   CheckCircle2, ChevronDown, Clock, Factory, Handshake,
   Kanban, LayoutDashboard, LayoutList, Package, PackageCheck,
   Pencil, Plus, ReceiptText, Save, Search, Settings,
@@ -433,7 +433,7 @@ function CrmKanban({ data: _data }: { data: SeedData }) {
           <button className="active" title="看板"><Kanban size={16} /></button>
           <button title="清單"><LayoutList size={16} /></button>
           <button title="行事曆"><CalendarRange size={16} /></button>
-          <button title="圖表"><ChartArea size={16} /></button>
+          <button title="圖表"><BarChart2 size={16} /></button>
         </div>
       </div>
       <div style={{padding:"8px 16px",background:"#fff",borderBottom:"1px solid #e5e7eb",fontSize:12,color:"var(--muted)"}}>
@@ -960,7 +960,7 @@ function ManufacturingPage({ data, setData, persist, advanceMfg }: {
 
 // ─── HR Page ──────────────────────────────────────────────────────────────────
 function HrPage({ data }: { data: SeedData }) {
-  const depts = [...new Set(data.employees.map(x => x.dept))];
+  const depts = Array.from(new Set(data.employees.map(x => x.dept)));
   return (
     <div className="grid two">
       <div className="panel">
