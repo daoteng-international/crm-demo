@@ -13,6 +13,12 @@ function isTransient(e: unknown): boolean {
   return ["503", "unavailable", "overload", "high demand", "429", "resource_exhausted", "rate limit", "internal", "500"].some((k) => s.includes(k));
 }
 
+// 每日配額用完（免費層）：同模型重試沒用，直接換下一個模型（各模型有各自的每日額度）
+function isQuota(e: unknown): boolean {
+  const s = (e instanceof Error ? e.message : String(e)).toLowerCase();
+  return ["quota", "resource_exhausted", "free_tier", "exceeded your current quota"].some((k) => s.includes(k));
+}
+
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // 依序嘗試各模型；遇到暫時性錯誤（503/429/overload）就退避重試，仍失敗才換下一個模型
@@ -29,6 +35,7 @@ async function generate(
       } catch (e) {
         lastErr = e;
         if (!isTransient(e)) throw e; // 非暫時性錯誤（例如金鑰錯誤）直接拋出
+        if (isQuota(e)) break; // 每日配額用完，換下一個模型
         if (attempt < 2) await wait(400 * (attempt + 1)); // 400ms、800ms 退避後重試同一模型
       }
     }
@@ -226,52 +233,52 @@ export async function POST(request: Request) {
   let changed = false;
 
   try {
-    // function-calling 迴圈（最多 3 輪）
-    for (let turn = 0; turn < 3; turn++) {
-      const response = await generate(ai, contents, config);
-      const calls = response.functionCalls ?? [];
+    // 單次呼叫：模型若要改資料就回 functionCall，我們在伺服器端確定性套用並自行組回覆，
+    // 不再做第二趟模型呼叫（省一半配額、且改資料在額度吃緊時仍可靠）。
+    const response = await generate(ai, contents, config);
+    const calls = response.functionCalls ?? [];
 
-      if (!calls.length) {
-        return NextResponse.json({
-          reply: response.text || "（沒有回覆內容）",
-          updatedData: changed ? workingData : undefined,
-          changed,
-        });
-      }
-
-      // 把模型的 functionCall 回合加入對話
-      const modelParts = calls.map((c) => ({ functionCall: c }));
-      contents.push({ role: "model", parts: modelParts as unknown as { text: string }[] });
-
-      // 逐一執行工具
-      const responseParts: unknown[] = [];
-      for (const call of calls) {
-        if (call.name === "apply_erp_changes") {
-          const ops = ((call.args as { operations?: Op[] })?.operations) ?? [];
-          const res = applyOps(workingData, ops);
-          workingData = res.snapshot;
-          if (res.changed) changed = true;
-          responseParts.push({
-            functionResponse: { name: call.name, response: { results: res.results } },
-          });
-        } else {
-          responseParts.push({
-            functionResponse: { name: call.name, response: { error: "未知函式" } },
-          });
-        }
-      }
-      contents.push({ role: "user", parts: responseParts as { text: string }[] });
+    // 純查詢（沒有 functionCall）→ 直接回模型文字
+    if (!calls.length) {
+      return NextResponse.json({ reply: response.text || "（沒有回覆內容）", changed: false });
     }
 
+    // 有改資料需求 → 確定性套用所有操作
+    const results: OpResult[] = [];
+    for (const call of calls) {
+      if (call.name === "apply_erp_changes") {
+        const ops = ((call.args as { operations?: Op[] })?.operations) ?? [];
+        const res = applyOps(workingData, ops);
+        workingData = res.snapshot;
+        if (res.changed) changed = true;
+        results.push(...res.results);
+      }
+    }
+
+    // 用套用結果自行組出確認訊息（不需再呼叫模型）
+    const okMsgs = results.filter((r) => r.ok).map((r) => r.message);
+    const errMsgs = results.filter((r) => !r.ok).map((r) => r.message);
+    let reply = "";
+    if (okMsgs.length) reply += "✅ " + okMsgs.join("；");
+    if (errMsgs.length) reply += (reply ? "\n" : "") + "⚠️ " + errMsgs.join("；");
+    if (changed) reply += "\n（記得按上方「儲存同步」才會寫入資料庫）";
+    if (!reply) reply = "沒有可套用的變更。";
+
     return NextResponse.json({
-      reply: "已處理你的請求。",
+      reply,
       updatedData: changed ? workingData : undefined,
       changed,
     });
   } catch (e) {
-    const reply = isTransient(e)
-      ? "Gemini 目前流量高峰，稍等幾秒再送一次通常就好了 🙏"
-      : `AI 服務發生錯誤：${e instanceof Error ? e.message : String(e)}`;
+    const s = (e instanceof Error ? e.message : String(e)).toLowerCase();
+    let reply: string;
+    if (s.includes("quota") || s.includes("free_tier") || s.includes("resource_exhausted") || s.includes("exceeded your current quota")) {
+      reply = "今天的 Gemini 免費額度用完了（免費層每個模型每日上限）。稍後再試，或把 API key 換成已開通付費/提高額度的專案就沒有這限制。";
+    } else if (isTransient(e)) {
+      reply = "Gemini 目前流量高峰，稍等幾秒再送一次通常就好了 🙏";
+    } else {
+      reply = `AI 服務發生錯誤：${e instanceof Error ? e.message : String(e)}`;
+    }
     return NextResponse.json({ reply, changed: false }, { status: 200 });
   }
 }
