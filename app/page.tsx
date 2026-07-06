@@ -3,11 +3,11 @@
 import {
   Banknote, Boxes, Building2, CalendarRange, BarChart2,
   CheckCircle2, ChevronDown, Clock, Factory, Handshake,
-  Kanban, LayoutDashboard, LayoutList, Package, PackageCheck,
-  Pencil, Plus, ReceiptText, Save, Search,
+  Kanban, LayoutDashboard, LayoutList, MessageCircle, Package, PackageCheck,
+  Pencil, Plus, ReceiptText, Save, Search, Send,
   Star, TrendingUp, Users, X
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { seedData, SeedData } from "./lib/seed";
 import type { BomItem, ExhibitionStatus, MfgStatus, OfficeStatus, RentalStatus } from "./lib/seed";
 
@@ -187,7 +187,54 @@ export default function Page(){
         {tab==="payroll"       && <PayrollPage data={data}/>}
         {tab==="finance"       && <FinancePage data={data} setData={setData} persist={persist}/>}
       </section>
+      <ChatWidget data={data} onApply={(d)=>{setData(d);setSaved("AI 已修改，尚未同步（請按上方「儲存同步」）");}}/>
     </main>
+  );
+}
+
+// ── AI 聊天助理 ───────────────────────────────────────────────────────────────
+type ChatMsg={role:"user"|"ai";text:string};
+function ChatWidget({data,onApply}:{data:SeedData;onApply:(d:SeedData)=>void}){
+  const [open,setOpen]=useState(false);
+  const [input,setInput]=useState("");
+  const [loading,setLoading]=useState(false);
+  const [msgs,setMsgs]=useState<ChatMsg[]>([
+    {role:"ai",text:"你好，我是紅山 ERP 助理。可以問我資料（例如「本月應收多少？」「哪些案子在施工中？」），也能請我改資料（例如「把 OF001 改成施工中」）。"}
+  ]);
+  const dataRef=useRef(data); dataRef.current=data;
+  const bodyRef=useRef<HTMLDivElement>(null);
+  useEffect(()=>{ bodyRef.current?.scrollTo(0,bodyRef.current.scrollHeight); },[msgs,loading,open]);
+
+  async function send(){
+    const text=input.trim();
+    if(!text||loading) return;
+    const history:ChatMsg[]=[...msgs,{role:"user",text}];
+    setMsgs(history); setInput(""); setLoading(true);
+    try{
+      const r=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({messages:history.filter(m=>m.role==="user"||m.role==="ai").slice(1),data:dataRef.current})});
+      const j=await r.json();
+      setMsgs(m=>[...m,{role:"ai",text:j.reply||"（沒有回覆）"}]);
+      if(j.changed && j.updatedData) onApply(j.updatedData);
+    }catch{
+      setMsgs(m=>[...m,{role:"ai",text:"連線失敗，請稍後再試。"}]);
+    }finally{ setLoading(false); }
+  }
+
+  if(!open) return <button className="chatFab" onClick={()=>setOpen(true)} aria-label="開啟 AI 助理"><MessageCircle size={22}/></button>;
+  return(
+    <div className="chatPanel">
+      <div className="chatHead"><span><MessageCircle size={16}/> AI 助理</span><button className="chatX" onClick={()=>setOpen(false)} aria-label="關閉"><X size={16}/></button></div>
+      <div className="chatBody" ref={bodyRef}>
+        {msgs.map((m,i)=><div key={i} className={`chatMsg ${m.role}`}>{m.text}</div>)}
+        {loading && <div className="chatMsg ai chatTyping">思考中…</div>}
+      </div>
+      <div className="chatInputRow">
+        <input className="chatInput" value={input} placeholder="問我或叫我改資料…"
+          onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter") send();}} disabled={loading}/>
+        <button className="chatSend" onClick={send} disabled={loading||!input.trim()} aria-label="送出"><Send size={16}/></button>
+      </div>
+    </div>
   );
 }
 
