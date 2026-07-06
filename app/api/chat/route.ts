@@ -5,7 +5,36 @@ import type { SeedData } from "../../lib/seed";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const MODEL = "gemini-2.5-flash";
+// 主模型 + 備援模型（尖峰時依序退避重試）
+const MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest"];
+
+function isTransient(e: unknown): boolean {
+  const s = (e instanceof Error ? e.message : String(e)).toLowerCase();
+  return ["503", "unavailable", "overload", "high demand", "429", "resource_exhausted", "rate limit", "internal", "500"].some((k) => s.includes(k));
+}
+
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// 依序嘗試各模型；遇到暫時性錯誤（503/429/overload）就退避重試，仍失敗才換下一個模型
+async function generate(
+  ai: GoogleGenAI,
+  contents: unknown,
+  config: unknown
+): Promise<Awaited<ReturnType<GoogleGenAI["models"]["generateContent"]>>> {
+  let lastErr: unknown;
+  for (const model of MODELS) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await ai.models.generateContent({ model, contents, config } as never);
+      } catch (e) {
+        lastErr = e;
+        if (!isTransient(e)) throw e; // 非暫時性錯誤（例如金鑰錯誤）直接拋出
+        if (attempt < 2) await wait(400 * (attempt + 1)); // 400ms、800ms 退避後重試同一模型
+      }
+    }
+  }
+  throw lastErr;
+}
 
 // ── 狀態機（與 app/page.tsx 一致）────────────────────────────────
 const STAGES: Record<string, string[]> = {
@@ -199,7 +228,7 @@ export async function POST(request: Request) {
   try {
     // function-calling 迴圈（最多 3 輪）
     for (let turn = 0; turn < 3; turn++) {
-      const response = await ai.models.generateContent({ model: MODEL, contents, config });
+      const response = await generate(ai, contents, config);
       const calls = response.functionCalls ?? [];
 
       if (!calls.length) {
@@ -240,7 +269,9 @@ export async function POST(request: Request) {
       changed,
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return NextResponse.json({ reply: `AI 服務發生錯誤：${msg}`, changed: false }, { status: 200 });
+    const reply = isTransient(e)
+      ? "Gemini 目前流量高峰，稍等幾秒再送一次通常就好了 🙏"
+      : `AI 服務發生錯誤：${e instanceof Error ? e.message : String(e)}`;
+    return NextResponse.json({ reply, changed: false }, { status: 200 });
   }
 }
